@@ -1,0 +1,780 @@
+
+%let today = %sysfunc(date(),yymmdd10.);
+
+data daty;
+	 format date_start yymmdd10. date_end yymmdd10.;
+	 date_start = intnx('year',today(),-1,'begin');
+     date_end =intnx('month',today(),-1,'end');
+run;
+
+proc sql print ;
+select distinct date_end into:date_end
+from daty;
+quit;
+%PUT &date_end;
+proc sql print ;
+select distinct year(date_end) as rok into:rok
+from daty;
+quit;
+%PUT &rok;
+proc sql print ;
+select distinct month(date_end) as miesiac into:miesiac
+from daty;
+quit;
+%PUT &miesiac;
+proc sql print ;
+select distinct day(date_end) as dzien into:dzien
+from daty;
+quit;
+%PUT &dzien;
+
+%macro change_datetime_format(table,variable);
+data &table;
+set &table;
+	&variable=datepart(&variable);
+	format &variable yymmdd10.;
+run;
+%mend;
+
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+/* PAID */
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+
+libname nadysk 'P:\DEP\Actuarial\05 REPORTS - OPERATIONAL\07 Actuary\02 Closing of the month\Database';
+
+proc sql;
+create table gl_insis2gl_pay as 
+select *
+ from bourCOPY.gl_insis2gl
+where gltrans_type in ('CLAIMPAY', 'CLAIMEXP', 'REVERSE', 'REGRESRQ', 'REGRESR')
+  and insr_type = 1001
+;
+quit;
+%change_datetime_format(gl_insis2gl_pay,account_date);
+
+proc sql;
+create table gl_insis2gl_month as
+select *
+  from gl_insis2gl_pay
+where (year(account_date) < &rok or (year(account_date) = &rok and month(account_date) <= &miesiac))
+;
+quit;
+
+proc sql;
+create table regresses_obj as 
+select *
+  from bourCOPY.claim_regresses_restore
+ where status <> '2' and expense_id = .
+;
+quit;
+
+proc sql;
+create table paid_obj as 
+select gl.*, c.event_date, 'OBJ' as type
+  from (select reference_id, gltrans_id, reversed_gltrans_id, gltrans_type, cover_type, fract_type, account_date, claim_number,
+               year(account_date) as calendar_year, month(account_date) as calendar_month, 
+               case when dt_account like '%REGRES%' then amount else 0 end as regresses,
+               case when dt_account like '%REGRES%' then 0 else amount end as amount
+		  from gl_insis2gl_month
+		 where (gltrans_type in ('REVERSE') 
+		        and reversed_gltrans_id in (select gltrans_id 
+		                                 from (select gltrans_id, gltrans_type 
+		                                         from gl_insis2gl_month
+		                                        where gltrans_type in ('CLAIMPAY')
+												      or (gltrans_type in ('REGRESRQ') and reference_id in (select regress_sum_id as reference_id from regresses_obj ))
+													  or (gltrans_type in ('REGRES') and reference_id in (select restore_id as reference_id from regresses_obj ))
+		                                       )
+									   )
+				) or gltrans_type in ('CLAIMPAY')
+				  or (gltrans_type in ('REGRESRQ') and reference_id in (select regress_sum_id as reference_id from regresses_obj ))
+				  or (gltrans_type in ('REGRES') and reference_id in (select restore_id as reference_id from regresses_obj ))		) gl
+		left join bourCOPY.claim c on c.claim_id=gl.claim_number
+;
+quit;
+%change_datetime_format(paid_obj,event_date);
+
+proc sql;
+create table regresses_exp as 
+select *
+  from bourCOPY.claim_regresses_restore
+ where status <> '2' and expense_id <> .
+;
+quit;
+proc sql;
+create table paid_exp as 
+select gl.*, c.event_date, 'EXP' as type
+  from (select reference_id, gltrans_id, reversed_gltrans_id, gltrans_type, cover_type, fract_type, account_date, claim_number,
+               year(account_date) as calendar_year, month(account_date) as calendar_month, 
+               case when dt_account like '%REGRES%' then amount else 0 end as regresses,
+               case when dt_account like '%REGRES%' then 0 else amount end as amount
+		  from gl_insis2gl_month
+		 where (gltrans_type in ('REVERSE') 
+		        and reversed_gltrans_id in (select gltrans_id 
+		                                 from (select gltrans_id, gltrans_type 
+		                                         from gl_insis2gl_month
+		                                        where gltrans_type in ('CLAIMEXP')
+												      or (gltrans_type in ('REGRESRQ') and reference_id in (select regress_sum_id as reference_id from regresses_exp ))
+													  or (gltrans_type in ('REGRES') and reference_id in (select restore_id as reference_id from regresses_exp ))
+		                                       )
+									   )
+				) or gltrans_type in ('CLAIMEXP')
+				  or (gltrans_type in ('REGRESRQ') and reference_id in (select regress_sum_id as reference_id from regresses_exp ))
+				  or (gltrans_type in ('REGRES') and reference_id in (select restore_id as reference_id from regresses_exp ))
+		) gl
+		left join bourCOPY.claim c on c.claim_id=gl.claim_number
+;
+quit;
+%change_datetime_format(paid_exp,event_date);
+
+data paid_hist;
+set paid_obj paid_exp;
+run;
+proc sql;
+create table paid_hist as 
+select ph.*,
+       case when cpd.claim_id is not null  then cpd.claim_id 
+	        when cpdr.claim_id is not null then cpdr.claim_id 
+			when cr.claim_id is not null   then cr.claim_id 
+            when ce.claim_id is not null   then ce.claim_id  end as claim_id_no,
+       case when cpd.request_id is not null  then cpd.request_id 
+	        when cpdr.request_id is not null then cpdr.request_id 
+			when cr.request_id is not null   then cr.request_id 
+            when ce.request_id is not null   then ce.request_id  end as request_id
+  from paid_hist ph
+       left join (select detail_id, claim_id, request_id from bourCOPY.claim_payments_details) cpd on cpd.detail_id=ph.reference_id
+	   left join (select reference_id, gltrans_id from bourCOPY.gl_insis2gl) glr on glr.gltrans_id=ph.reversed_gltrans_id
+	   left join (select detail_id, claim_id, request_id from bourCOPY.claim_payments_details) cpdr on cpdr.detail_id=glr.reference_id
+	   left join (select regress_sum_id, claim_id, request_id from bourCOPY.claim_regresses_sum) cr on cr.regress_sum_id=ph.reference_id
+	   left join (select claim_exp_seq, claim_id, request_id from bourCOPY.claim_expenses) ce on ce.claim_exp_seq=ph.reference_id
+ order by gltrans_type
+;
+quit;
+data paid_hist;
+set paid_hist;
+claim_id = input(claim_id_no, 12.);
+drop claim_id_no detail_id reference_id regress_sum_id claim_exp_seq reversed_gltrans_id;
+run;
+
+data nadysk.paid_hist;
+set paid_hist;
+run;
+
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+/* RESERVE */
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+
+proc sql;
+create table claim_reserve_obj_hist as 
+select  policy_id, event_date, event_type, cr.claim_id, claim_type, registration_date_c, request_id, claim_type_cr, 
+        claim_state, claim_state_desc, username_cr as username, solve_way_desc, registration_date_cr as registration_date,
+        case when cover_type = ' ' then 'MTPL' else cover_type end as cover_type,risk_type, risk_name, 
+	    case when risk_type in ('UGPL_1028','UGPL_1029','UGPL_1030','UGPL_1031','UGPL_1034','UGPL_1035','UGPL_1036','UGPL_1037',
+                                  'UGPL_1038','UGPL_1039','UGPL_1040','UGPL_1041','UGPL_1042','UGPL_1043','UGPL_1044','UGPL_1045',
+                                  'UGPL_1047','UGPL_1187','UGPL_1195','UGPL_1198','UGPL_1199','UGPL_1200') then 1 else 0 end as szkoda_osobowa,
+       claim_obj_seq, initial_reserv_amnt, last_reserv_amnt, last_reserv_amnt as  hist_reserve, reserve_change_amnt as diff_reserve, 
+       hist_change_date, hist_change_by, history_id
+  from bourCOPY.ugpl_claim_reserves_hst_indem cr
+  		left join (select state_id, name as claim_state_desc from bourCOPY.hst_claim_state where status='A') chss on chss.state_id=cr.claim_state
+		left join (select id, name as solve_way_desc from bourCOPY.ht_claim_solve_way) hcs on hcs.id=cr.solve_way
+        left join (select id, risk_name from bourCOPY.hst_gen_risk where status='A') chs on chs.id=cr.risk_type
+        inner join (select claim_id, insr_type from bourCOPY.claim where insr_type = 1001) c on c.claim_id=cr.claim_id
+ where (year(hist_change_date) < &rok ) or (year(hist_change_date) = &rok and month(hist_change_date) <= &miesiac) 
+;
+quit;
+%change_datetime_format(claim_reserve_obj_hist,event_date);
+%change_datetime_format(claim_reserve_obj_hist,hist_change_date);
+
+proc sql;
+create table claim_req_max as
+select claim_id, request_id, catt('obj',max(history_id)) as hist_event
+  from claim_reserve_obj_hist
+ group by claim_id, request_id
+ order by claim_id, request_id
+;
+quit;
+
+proc sql;
+create table claim_reserve_exp_hist as 
+select  policy_id, event_date, event_type, cr.claim_id, claim_type, registration_date_c, request_id, claim_type_cr, 
+        claim_state, claim_state_desc, username_cr as username, solve_way_desc, registration_date_cr as registration_date,
+        case when cover_type = ' ' then 'MTPL' else cover_type end as cover_type,risk_type, risk_name, 
+	    case when risk_type in ('UGPL_1028','UGPL_1029','UGPL_1030','UGPL_1031','UGPL_1034','UGPL_1035','UGPL_1036','UGPL_1037',
+                                  'UGPL_1038','UGPL_1039','UGPL_1040','UGPL_1041','UGPL_1042','UGPL_1043','UGPL_1044','UGPL_1045',
+                                  'UGPL_1047','UGPL_1187','UGPL_1195','UGPL_1198','UGPL_1199','UGPL_1200') then 1 else 0 end as szkoda_osobowa,
+       claim_obj_seq, claim_exp_seq, expense_id, 
+       case when claim_exp_seq <> 2050017011 and operation = 'CONFIRM' and clm_reserve_change = 0 then 0 else clm_expense_sum end as hist_reserve, 
+       case when claim_exp_seq <> 2050017011 and operation = 'CONFIRM' and clm_reserve_change = 0 then -clm_expense_sum else clm_reserve_change end as diff_reserve, 
+       hist_change_date, hist_change_by, history_id
+  from bourCOPY.ugpl_claim_reserves_hst_exp cr
+  		left join (select state_id, name as claim_state_desc from bourCOPY.hst_claim_state where status='A') chss on chss.state_id=cr.claim_state
+		left join (select id, name as solve_way_desc from bourCOPY.ht_claim_solve_way) hcs on hcs.id=cr.solve_way
+        left join (select id, risk_name from bourCOPY.hst_gen_risk where status='A') chs on chs.id=cr.risk_type
+        inner join (select claim_id, insr_type from bourCOPY.claim where insr_type = 1001) c on c.claim_id=cr.claim_id
+ where (year(hist_change_date) < &rok ) or (year(hist_change_date) = &rok and month(hist_change_date) <= &miesiac) 
+;
+quit;
+%change_datetime_format(claim_reserve_exp_hist,event_date);
+%change_datetime_format(claim_reserve_exp_hist,hist_change_date);
+
+
+proc sql;
+create table claim_hist as
+select *
+  from (select policy_id, claim_id, claim_type, event_type, request_id, claim_type_cr, claim_state, registration_date,
+               0 as claim_exp_seq, 0 as expense_id, claim_obj_seq, risk_type, risk_name, szkoda_osobowa, 
+               hist_reserve, diff_reserve, hist_change_date, hist_change_by, catt('obj', history_id) as hist_event
+          from claim_reserve_obj_hist)
+ union all
+		  (select policy_id, claim_id, claim_type, event_type, request_id, claim_type_cr, claim_state, registration_date,
+                  claim_exp_seq, expense_id, claim_obj_seq, risk_type, risk_name, szkoda_osobowa,
+                  hist_reserve, diff_reserve,hist_change_date, hist_change_by, catt('exp', history_id) as hist_event
+             from claim_reserve_exp_hist)
+order by policy_id, claim_id, request_id, claim_obj_seq, claim_exp_seq, expense_id, hist_change_date
+;
+quit;
+proc sql;
+create table claim_hist as 
+select ch.*, c.event_date, 
+       case when com.cover_type=' ' then co.cover_type else com.cover_type end as cover_type
+  from claim_hist ch
+       left join bourCOPY.claim c on c.claim_id=ch.claim_id 
+       left join (select claim_id, request_id,  history_id, cover_type
+   					from claim_reserve_obj_hist 
+				   where catt('obj', history_id) in (select hist_event from claim_req_max)) com on com.claim_id=ch.claim_id and com.request_id=ch.request_id
+	   left join bourCOPY.claim_objects co on co.claim_obj_seq=ch.claim_obj_seq
+;
+quit;
+%change_datetime_format(claim_hist,event_date);
+DATA claim_hist;
+SET claim_hist;
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+if hist_reserve = . then hist_reserve=0; else hist_reserve=hist_reserve;
+if diff_reserve = . then diff_reserve=0; else diff_reserve=diff_reserve;
+     if cover_type='MTPL' and szkoda_osobowa = 1 then cover_type='MTPL_BI   ';
+else if cover_type='MTPL' and szkoda_osobowa = 0 then cover_type='MTPL_PROP ';
+else cover_type=cover_type;
+RUN;
+
+
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+/* Wartoúś rezerw i wyp≥at - dane do trůjkĻta */
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+
+proc sql;
+create table claim_bi as 
+select distinct claim_id, request_id, cover_type, 'BI' as szkoda_osobowa
+  from claim_hist
+ where szkoda_osobowa = 1;
+;
+quit;
+
+proc sql;
+create table claim_paid_hist as 
+select claim_number as claim_id, cover_type, event_date, account_date, sum(amount_obj) as paid_obj, sum(amount_exp) as paid_exp, szkoda_osobowa
+  from (select ch.*, case when type = 'EXP' then amount else 0 end as amount_exp,
+ 					 case when type = 'OBJ' then amount else 0 end as amount_obj, bi.szkoda_osobowa
+          from paid_hist ch
+    		   left join claim_bi bi on bi.claim_id=ch.claim_number and bi.request_id=ch.request_id
+       )
+ group by claim_number, cover_type, event_date, account_date, szkoda_osobowa
+ order by claim_number, cover_type, event_date, account_date, szkoda_osobowa
+;
+quit;
+DATA claim_paid_hist;
+SET claim_paid_hist;
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+     if year(event_date) = year(account_date) then DEVELOPMENT = qtr(account_date) - qtr(event_date); 
+else if year(event_date) < year(account_date) then DEVELOPMENT = 4 - qtr(event_date) + qtr(account_date);
+ACC_PERIOD = catt(year(event_date),'/', qtr(event_date));
+DEV_PERIOD = catt(year(account_date),'/', qtr(account_date));
+     if cover_type='MTPL      ' and szkoda_osobowa = 'BI' then package='MTPL_BI   ';
+else if cover_type='MTPL      ' and szkoda_osobowa = ''   then package='MTPL_PROP ';
+else if cover_type='GREENCARD ' then package='MTPL      ';
+else if cover_type='PA_MOTOR  ' then package='PA_MOTOR  ';
+else if cover_type='PA        ' then package='PA_HOME   ';
+else if cover_type='PAYPROT   ' then package='PAYPROT   ';
+else if cover_type='LGLPROT   ' then package='LGLPROT   ';
+else if cover_type='ASS_MINI  ' then package='ASS_DAMAGE';
+else if cover_type='ASS_PREM  ' then package='ASS_SUPER ';
+else if cover_type='CSC_ACC_RB' then package='CASCO     ';
+else if cover_type='CSC_ACC_RN' then package='CASCO     ';
+else if cover_type='CSC_ACC_V ' then package='CASCO     ';
+else if cover_type='CSC_FLX_RB' then package='CASCO     ';
+else if cover_type='CSC_FLX_RN' then package='CASCO     ';
+else if cover_type='CSC_FLX_V ' then package='CASCO     ';
+else if cover_type='CSC_THT_P ' then package='CASCO     ';
+else if cover_type='CSC_THT_T ' then package='CASCO     ';
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+drop cover_type;
+RUN;
+
+proc sql;
+create table claim_paid_hists as 
+select package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT, sum(paid_obj) as paid_obj, sum(paid_exp) as paid_exp
+  from claim_paid_hist
+ group by package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT
+ order by package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT
+;
+quit;
+
+/*****************************/
+
+proc sql;
+create table claim_reserve_hist as 
+select claim_id, cover_type, event_date, hist_change_date, sum(reserve_obj) as diff_reserve_obj, sum(reserve_exp) as diff_reserve_exp
+  from (select ch.*, case when claim_exp_seq > 0 then diff_reserve else 0 end as reserve_exp,
+ 					 case when claim_exp_seq > 0 then 0 else diff_reserve end as reserve_obj
+          from claim_hist ch)
+ group by claim_id, cover_type, event_date, hist_change_date
+ order by claim_id, cover_type, event_date, hist_change_date
+;
+quit;
+DATA claim_reserve_hist;
+SET claim_reserve_hist;
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+     if year(event_date) = year(hist_change_date) then DEVELOPMENT = qtr(hist_change_date) - qtr(event_date); 
+else if year(event_date) < year(hist_change_date) then DEVELOPMENT = 4 - qtr(event_date) + qtr(hist_change_date);
+ACC_PERIOD = catt(year(event_date),'/', qtr(event_date));
+DEV_PERIOD = catt(year(hist_change_date),'/', qtr(hist_change_date));
+     if cover_type='MTPL_BI   ' then package='MTPL_BI   ';
+else if cover_type='MTPL_PROP ' then package='MTPL_PROP ';
+else if cover_type='GREENCARD ' then package='MTPL      ';
+else if cover_type='PA_MOTOR  ' then package='PA_MOTOR  ';
+else if cover_type='PA        ' then package='PA_HOME   ';
+else if cover_type='PAYPROT   ' then package='PAYPROT   ';
+else if cover_type='LGLPROT   ' then package='LGLPROT   ';
+else if cover_type='ASS_MINI  ' then package='ASS_DAMAGE';
+else if cover_type='ASS_PREM  ' then package='ASS_SUPER ';
+else if cover_type='CSC_ACC_RB' then package='CASCO     ';
+else if cover_type='CSC_ACC_RN' then package='CASCO     ';
+else if cover_type='CSC_ACC_V ' then package='CASCO     ';
+else if cover_type='CSC_FLX_RB' then package='CASCO     ';
+else if cover_type='CSC_FLX_RN' then package='CASCO     ';
+else if cover_type='CSC_FLX_V ' then package='CASCO     ';
+else if cover_type='CSC_THT_P ' then package='CASCO     ';
+else if cover_type='CSC_THT_T ' then package='CASCO     ';
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+drop cover_type;
+RUN;
+
+proc sql;
+create table claim_reserve_hists as 
+select package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT, sum(diff_reserve_obj) as diff_reserves_obj, sum(diff_reserve_exp) as diff_reserves_exp
+  from claim_reserve_hist
+ group by package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT
+ order by package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT
+;
+quit;
+
+/*****************************/
+
+proc sql;
+create table claim_number_CL as 
+select claim_id, cover_type, catt(claim_id, cover_type) as lacznik, round(sum(diff_reserve), 0.01) as reserva_obj
+  from (select * 
+          from claim_hist 
+         where claim_state <> 11 and claim_exp_seq = 0)
+ group by claim_id, cover_type
+ having round(sum(diff_reserve), 0.01) = 0 
+;
+quit;
+
+proc sql;
+create table claim_number as 
+select a.*, case when catt(claim_id, cover_type) in (select lacznik from claim_number_CL) then 1 else 0 end as CLAIM_CL
+  from (
+		select claim_id, cover_type, event_date, min(registration_date) as registration_date 
+		  from (select * from claim_hist where claim_state <> 11)
+		 group by claim_id, cover_type, event_date
+       ) a
+ order by claim_id, cover_type, event_date
+;
+quit;
+%change_datetime_format(claim_number,registration_date);
+DATA claim_number ;
+SET claim_number ;
+CLAIM = 1;
+     if year(event_date) = year(registration_date) then DEVELOPMENT = qtr(registration_date) - qtr(event_date); 
+else if year(event_date) < year(registration_date) then DEVELOPMENT = 4 - qtr(event_date) + qtr(registration_date);
+ACC_PERIOD = catt(year(event_date),'/', qtr(event_date));
+DEV_PERIOD = catt(year(registration_date),'/', qtr(registration_date));
+     if cover_type='MTPL_BI   ' then package='MTPL_BI   ';
+else if cover_type='MTPL_PROP ' then package='MTPL_PROP ';
+else if cover_type='PA_MOTOR  ' then package='PA_MOTOR  ';
+else if cover_type='PA        ' then package='PA_HOME   ';
+else if cover_type='PAYPROT   ' then package='PAYPROT   ';
+else if cover_type='LGLPROT   ' then package='LGLPROT   ';
+else if cover_type='ASS_MINI  ' then package='ASS_DAMAGE';
+else if cover_type='ASS_PREM  ' then package='ASS_SUPER ';
+else if cover_type='CSC_ACC_RB' then package='CASCO     ';
+else if cover_type='CSC_ACC_RN' then package='CASCO     ';
+else if cover_type='CSC_ACC_V ' then package='CASCO     ';
+else if cover_type='CSC_FLX_RB' then package='CASCO     ';
+else if cover_type='CSC_FLX_RN' then package='CASCO     ';
+else if cover_type='CSC_FLX_V ' then package='CASCO     ';
+else if cover_type='CSC_THT_P ' then package='CASCO     ';
+else if cover_type='CSC_THT_T ' then package='CASCO     ';
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+drop cover_type;
+RUN;
+
+proc sql;
+create table claim_numbers as 
+select package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT, sum(claim) as claims, sum(claim_cl) as claims_cl
+  from claim_number
+ group by package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT
+ order by package, ACC_PERIOD, DEV_PERIOD, DEVELOPMENT
+;
+quit;
+
+/*****************************/
+
+proc sql print ;
+select distinct year(max(event_date)) as max_year_acc into:max_year_acc
+from claim_number;
+quit;
+%PUT &max_year_acc;
+Data development;
+lacznik=1;
+format acc_period yymmdd10. dev_period yymmdd10.;
+do j=2012 to &max_year_acc by 1;
+   do i=1 to 4 by 1;
+       do k=i to 4 by 1;
+	        ACC_PERIOD=intnx('qtr',mdy(i*3,1,j),-0,'end');
+	        DEV_PERIOD=intnx('qtr',mdy(k*3,1,j),-0,'end');
+			ACC_PERIOD1=catt(j,'/',i);
+	        DEV_PERIOD1=catt(j,'/',k);
+			DEVELOPMENT=k-i;
+	      output;
+	  end;
+   end;
+end;
+do j=2012 to &max_year_acc by 1;
+   do i=1 to 4 by 1;
+       do k=j+1 to year(today()) by 1;
+	      do m=1 to 4 by 1;
+		  	ACC_PERIOD=intnx('qtr',mdy(i*3,1,j),-0,'end');
+	        DEV_PERIOD=intnx('qtr',mdy(m*3,1,k),-0,'end');
+	        ACC_PERIOD1=catt(j,'/',i);
+	        DEV_PERIOD1=catt(k,'/',m);
+			DEVELOPMENT= (4-i)+(k-j-1)*4+m;
+	      output;
+		  end;
+	  end;
+   end;
+end;
+drop i j k m;
+run;
+
+proc sql;
+create table covers as 
+select unique cover_type
+  from claim_hist
+;
+quit;
+data covers;
+set covers;
+lacznik = 1;
+     if cover_type='MTPL_BI   ' then package='MTPL_BI   ';
+else if cover_type='MTPL_PROP ' then package='MTPL_PROP ';
+else if cover_type='GREENCARD ' then package='MTPL      ';
+else if cover_type='PA_MOTOR  ' then package='PA_MOTOR  ';
+else if cover_type='PA        ' then package='PA_HOME   ';
+else if cover_type='PAYPROT   ' then package='PAYPROT   ';
+else if cover_type='LGLPROT   ' then package='LGLPROT   ';
+else if cover_type='ASS_MINI  ' then package='ASS_DAMAGE';
+else if cover_type='ASS_PREM  ' then package='ASS_SUPER ';
+else if cover_type='CSC_ACC_RB' then package='CASCO     ';
+else if cover_type='CSC_ACC_RN' then package='CASCO     ';
+else if cover_type='CSC_ACC_V ' then package='CASCO     ';
+else if cover_type='CSC_FLX_RB' then package='CASCO     ';
+else if cover_type='CSC_FLX_RN' then package='CASCO     ';
+else if cover_type='CSC_FLX_V ' then package='CASCO     ';
+else if cover_type='CSC_THT_P ' then package='CASCO     ';
+else if cover_type='CSC_THT_T ' then package='CASCO     ';
+drop cover_type;
+run;
+proc sql;
+create table covers as 
+select unique * 
+  from covers
+;
+quit;
+data covers;
+set covers;
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+run;
+
+proc sql;
+create table development as 
+select * 
+  from development o
+       left join (select unique lacznik, package from covers) c on c.lacznik=o.lacznik
+order by acc_period, dev_period
+;
+quit;
+
+
+/*****************************/
+
+proc sql;
+create table claim_data as 
+select a.*,  reserves_obj+reserves_exp as reserve, paid_obj+paid_exp as paid
+  from (
+select o.*, o.package,
+            case when cn.diff_reserves_obj=. then 0 else round(cn.diff_reserves_obj, 0.01) end as reserves_obj,
+            case when cn.diff_reserves_exp=. then 0 else round(cn.diff_reserves_exp, 0.01) end as reserves_exp,
+			case when cn2.paid_obj=. then 0 else round(cn2.paid_obj, 0.01) end as paid_obj,
+            case when cn2.paid_exp=. then 0 else round(cn2.paid_exp, 0.01) end as paid_exp,
+			case when cn3.claims=. then 0 else round(cn3.claims, 0.01) end as claims,
+			case when cn3.claims_cl=. then 0 else round(cn3.claims_cl, 0.01) end as claims_cl
+  from development o
+       left join claim_reserve_hists cn on cn.development=o.development and cn.acc_period=o.acc_period1 and cn.dev_period=o.dev_period1 and cn.package=o.package
+	   left join claim_paid_hists cn2 on cn2.development=o.development and cn2.acc_period=o.acc_period1 and cn2.dev_period=o.dev_period1 and cn2.package=o.package
+	   left join claim_numbers cn3 on cn3.development=o.development and cn3.acc_period=o.acc_period1 and cn3.dev_period=o.dev_period1 and cn3.package=o.package
+       ) a
+order by acc_period, dev_period
+;
+quit;
+
+/*proc sql;
+create table test as 
+select sum(reserves_obj), sum(reserves_exp), sum(paid_obj), sum(paid_exp)
+  from claim_data
+;
+quit;*/
+
+proc sql print ;
+select distinct max(development)+1 as develto into:develto
+from claim_data;
+quit;
+%PUT &develto;
+proc sql print ;
+select distinct catt('DEV',max(development)) as max_develto into:max_develto
+from claim_data;
+quit;
+%PUT &max_develto;
+proc sql print ;
+select distinct catt('DEV', min(development)) as min_develto into:min_develto
+from claim_data;
+quit;
+%PUT &min_develto;
+proc sql print ;
+select distinct CATT('DEV',put(max(dev_period),yymmdd10.)) as max_dev_period  into:max_dev_period
+from claim_data;
+quit;
+%PUT &max_dev_period;
+proc sql print ;
+select distinct CATT('DEV',put(min(dev_period),yymmdd10.)) as min_dev_period  into:min_dev_period
+from claim_data;
+quit;
+%PUT &min_dev_period;
+
+
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+/* TR”JK•TY */
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+/* TrůjkĻ rozk≥adu opůünieŮ w rezerwach */
+/******************************************************************************************************************************************************************/
+/******************************************************************************************************************************************************************/
+
+%macro triangle(zmienna, package_out);
+
+data claim_data_package;
+set claim_data;
+where package = "&package_out.";
+run;
+
+PROC DATASETS DDNAME = work NOLIST;
+MODIFY claim_data_package;
+ATTRIB reserves_obj Format=10.2 Label = 'Reserve for indemnity';
+ATTRIB reserves_exp Format=10.2 Label = 'Reserve for expenses';
+ATTRIB paid_obj     Format=10.2 Label = 'Paid for indemnity';
+ATTRIB paid_exp     Format=10.2 Label = 'Paid for expenses';
+ATTRIB claims       Format=10.0 Label = 'Number of Claims';
+ATTRIB claims_cl    Format=10.0 Label = 'Number of Closed Claims';
+ATTRIB reserve      Format=10.2 Label = 'Reserve';
+ATTRIB paid         Format=10.2 Label = 'Payments';
+RUN;
+
+/* TrůjkĻt inkrementalny */
+
+PROC TRANSPOSE DATA = claim_data_package
+OUT = TRG_3_&package_out._&zmienna
+PREFIX = DEV
+NAME = ORIGVAR
+LABEL = VARLABEL;
+ID DEVELOPMENT;
+BY ACC_PERIOD;
+VAR &zmienna;
+IDLABEL DEVELOPMENT;
+RUN;
+DATA TRG_3_&package_out._&zmienna;
+SET TRG_3_&package_out._&zmienna;
+sum_zmienna=0;
+array DEV(&develto) &min_develto-&max_develto;
+do i = 1 to &develto while (DEV{i} ne ' ');
+sum_zmienna+DEV{i};
+end;
+RUN;
+
+PROC REPORT DATA=TRG_3_&package_out._&zmienna out=WORKFIL333 nowd headline headskip split='*' style(header)={cellheight=.5in};
+column _all_;
+rbreak after/summarize dol dul style=[font_weight=bold color=green fontstyle=roman font_size=2 background=#EBF2E6] ;
+COMPUTE policy_id;
+IF _break_='_RBREAK_' THEN CALL DEFINE('Policy_ID','style','style=[pretext="Sum"]');
+title "&package_out.";
+ENDCOMP;
+RUN;
+DATA WORKFIL333;
+SET WORKFIL333;
+WHERE _BREAK_ = '_RBREAK_';
+DROP _BREAK_ ;
+RUN;
+
+DATA TRG_3_&package_out._&zmienna;
+SET TRG_3_&package_out._&zmienna WORKFIL333;
+IF VARLABEL='' THEN ACC_PERIOD=''; ELSE ACC_PERIOD=ACC_PERIOD;
+FORMAT ROW_NUM 10.;
+ROW_NUM=_N_;
+RUN;
+
+/*proc print data=TRG_3_&package_out._&zmienna;var acc_period varlabel &min_develto-&max_develto sum_zmienna; title "&package_out."; run;*/
+
+/* TrůjkĻt kumulatywny*/
+
+DATA TRG_33_&package_out._&zmienna;
+ARRAY DEVELOPMT(*) &min_develto-&max_develto;
+SET TRG_3_&package_out._&zmienna;
+DEVELOTO = &develto - ROW_NUM + 1;
+DO i = 1 TO DEVELOTO;
+If DEVELOPMT(i) = . THEN DEVELOPMT(i) = 0;
+If i GE 2 THEN DEVELOPMT(i) = DEVELOPMT(i) + DEVELOPMT(i-1);
+WHERE VARLABEL <> ' ';
+END;
+RUN;
+DATA TRG_33_&package_out._&zmienna;
+RETAIN ACC_PERIOD VARLABEL &min_develto-&max_develto;
+SET TRG_33_&package_out._&zmienna;
+RUN;
+DATA TRG_33_&package_out._&zmienna;
+SET TRG_33_&package_out._&zmienna;
+sum_zmienna=0;
+array DEV(&develto) &min_develto-&max_develto;
+do i = 1 to &develto while (DEV{i} ne ' ');
+if i = 1 then sum_zmienna+DEV{i}; else sum_zmienna+DEV{i}-DEV{i-1};
+end;
+RUN;
+DATA WORKFIL333;
+SET TRG_3_&package_out._&zmienna;
+WHERE VARLABEL = ' ';
+RUN;
+DATA WORKFIL333;
+ARRAY DEVELOPMT(*) &min_develto-&max_develto;
+SET WORKFIL333;
+DEVELOTO = &develto;
+DO i = 1 TO DEVELOTO;
+If DEVELOPMT(i) = . THEN DEVELOPMT(i) = 0;
+If i GE 2 THEN DEVELOPMT(i) = DEVELOPMT(i) + DEVELOPMT(i-1);
+WHERE VARLABEL = ' ';
+END;
+RUN;
+DATA TRG_33_&package_out._&zmienna;
+SET TRG_33_&package_out._&zmienna WORKFIL333 ;
+RUN;
+
+proc print data=TRG_33_&package_out._&zmienna; var acc_period varlabel &min_develto-&max_develto sum_zmienna; title "&package_out."; run;
+
+
+goptions reset=all border cback=white htitle=12pt htext=10pt;                                                                           
+proc transpose data=TRG_33_&package_out._&zmienna (where=(acc_period<>.))out = wykres;
+by acc_period;
+var &min_develto-&max_develto;
+id origvar;
+run;
+symbol1 interpol=join value=dot height=1.0;  
+symbol2 interpol=join value=dot height=1.0;                                                                                           
+symbol3 interpol=join value=dot height=1.0;                                                                                           
+symbol4 interpol=join value=dot height=1.0;  
+symbol6 interpol=join value=dot height=1.0;                                                                                           
+symbol7 interpol=join value=dot height=1.0;                                                                                           
+symbol8 interpol=join value=dot height=1.0;
+symbol9 interpol=join value=dot height=1.0;                                                                                           
+symbol10 interpol=join value=dot height=1.0;                                                                                           
+symbol11 interpol=join value=dot height=1.0;
+symbol12 interpol=join value=dot height=1.0;
+symbol13 interpol=join value=dot height=1.0;
+title1 "&package_out. - &zmienna.";
+proc gplot data= wykres;
+   plot &zmienna*_label_=acc_period / hminor=0;
+run;
+
+%mend;
+
+
+%macro readin;
+proc sql;
+select max(row_num) as max_row_num into :max_row_num 
+  from covers
+quit; 
+%put &max_row_num ;
+
+%do i=3 %to 6;  
+proc sql;
+select package as package_out into :package_out
+  from covers
+ where row_num =  &i;
+quit; 
+%put &package_out;
+%triangle(claims, &package_out);
+%triangle(claims_cl, &package_out);/*
+%triangle(reserves_obj, &package_out);
+%triangle(paid_obj, &package_out);
+%triangle(reserves_exp, &package_out);
+%triangle(paid_exp, &package_out);*/
+%triangle(reserve, &package_out);
+%triangle(paid, &package_out);
+%end;
+%mend readin;                                                
+                                                             
+%readin;
+
+
+
+/*
+proc sql;
+create table  test as 
+select claim_id, round(sum(diff_reserve_exp), 0.01) as res
+  from claim_reserve_hist
+where  package like '%MTPL%'
+group by claim_id
+having round(sum(diff_reserve_exp), 0.01) <> 0
+order by claim_id
+;
+quit;
+
+proc sql;
+create table  test as 
+select * 
+  from claim_hist
+where claim_id = '20700004376'
+order by claim_id;
+quit;
