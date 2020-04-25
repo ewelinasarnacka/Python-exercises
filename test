@@ -1,4 +1,12 @@
 
+```sas
+proc import databafile=reffile
+    dbms=csv
+    out=output.mydataset;
+    getnames=yes;
+run;
+```
+
 %let today = %sysfunc(date(),yymmdd10.);
 
 data daty;
