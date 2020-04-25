@@ -1,9 +1,0 @@
-
-
-```sas
-proc import databafile=reffile
-    dbms=csv
-    out=output.mydataset;
-    getnames=yes;
-run;
-```
